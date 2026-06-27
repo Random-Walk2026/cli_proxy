@@ -15,10 +15,11 @@ import os
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import AsyncIterator, Optional
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from .account import Account
@@ -31,9 +32,13 @@ from .anthropic import (
 from .pool import get_pool
 from .providers import get_provider, SUPPORTED
 from .providers.antigravity_http import AntigravityHTTPProvider
+from .quota import QUOTA_SUPPORTED, refresh_quota, supports_quota
 from .router import parse_model
 
 app = FastAPI(title="cli_proxy API", version="2.0.0")
+
+# 自包含的账号状态仪表盘（静态 HTML，无构建步骤），与 Streamlit 管理台同放在 ui/ 下
+_UI_DIR = Path(__file__).parent / "ui"
 
 # CLI subprocess 在专用线程池里跑
 _executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="cli_proxy")
@@ -226,6 +231,17 @@ async def _run_anthropic_with_pool(
 
 # ── 路由 ──────────────────────────────────────────────────────────────────────
 
+@app.get("/", response_class=HTMLResponse)
+@app.get("/dashboard", response_class=HTMLResponse)
+async def dashboard():
+    """账号状态仪表盘：可视化展示账号池（调用 /v0/management/accounts）。"""
+    page = _UI_DIR / "dashboard.html"
+    try:
+        return HTMLResponse(page.read_text(encoding="utf-8"))
+    except OSError:
+        raise HTTPException(status_code=500, detail="dashboard.html 缺失")
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok", "version": "2.0.0"}
@@ -320,6 +336,74 @@ async def management_accounts_backend(backend: str):
         raise HTTPException(status_code=404, detail=f"未知 provider：{backend}")
     pool = get_pool()
     return {"backend": backend, "accounts": pool.status().get(backend, [])}
+
+
+class AccountAction(BaseModel):
+    backend: str
+    id: str
+    action: str  # enable | disable | reset | refresh_quota
+    pre_refresh: bool = False  # refresh_quota 时是否强制先刷新 token（claude 默认 usage-first）
+
+
+@app.post("/v0/management/accounts/action")
+async def management_account_action(req: AccountAction):
+    """对单个账号执行管理操作（启用 / 禁用 / 重置冷却 / 刷新额度）。供管理面板按钮调用。"""
+    pool = get_pool()
+    action = req.action.lower().strip()
+    if action == "enable":
+        acc = pool.set_enabled(req.backend, req.id, True)
+    elif action == "disable":
+        acc = pool.set_enabled(req.backend, req.id, False)
+    elif action == "reset":
+        acc = pool.reset_account(req.backend, req.id)
+    elif action == "refresh_quota":
+        acc = pool.find(req.backend, req.id)
+        if acc is None:
+            raise HTTPException(status_code=404, detail=f"未找到账号：{req.backend}/{req.id}")
+        if not supports_quota(acc.backend):
+            raise HTTPException(status_code=400, detail=f"{acc.backend} 不支持额度查询")
+        try:
+            await asyncio.get_event_loop().run_in_executor(
+                _executor, lambda: refresh_quota(acc, pre_refresh=req.pre_refresh)
+            )
+        except RuntimeError as exc:
+            # 刷新失败时 quota_error 已写入账号，仍返回账号（前端展示错误）
+            return JSONResponse(
+                status_code=502,
+                content={"status": "error", "detail": str(exc), "account": acc.to_dict()},
+            )
+        return {"status": "ok", "account": acc.to_dict()}
+    else:
+        raise HTTPException(status_code=400, detail=f"未知操作：{req.action}")
+    if acc is None:
+        raise HTTPException(
+            status_code=404, detail=f"未找到账号：{req.backend}/{req.id}"
+        )
+    return {"status": "ok", "account": acc.to_dict()}
+
+
+@app.post("/v0/management/quota/refresh")
+async def management_quota_refresh(pre_refresh: bool = False):
+    """刷新所有支持额度查询的账号（codex / claude），返回每个账号的结果。
+
+    pre_refresh=true 时强制先刷新各账号 token 再查（claude 默认 usage-first 以避开刷新端点限流）。
+    """
+    pool = get_pool()
+    loop = asyncio.get_event_loop()
+    results: list[dict] = []
+    for backend in QUOTA_SUPPORTED:
+        for acc in pool.accounts(backend):
+            entry = {"backend": acc.backend, "id": acc.id}
+            try:
+                await loop.run_in_executor(
+                    _executor, lambda a=acc: refresh_quota(a, pre_refresh=pre_refresh)
+                )
+                entry["status"] = "ok"
+            except RuntimeError as exc:
+                entry["status"] = "error"
+                entry["detail"] = str(exc)
+            results.append(entry)
+    return {"status": "ok", "results": results}
 
 
 @app.post("/v0/management/reload")

@@ -15,6 +15,7 @@
 - [模型字符串格式](#模型字符串格式)
 - [三种调用方式](#三种调用方式)
 - [管理 API](#管理-api)
+- [账号状态面板](#账号状态面板)
 - [环境变量参考](#环境变量参考)
 - [Antigravity 特殊说明](#antigravity-特殊说明)
 
@@ -351,6 +352,14 @@ curl http://127.0.0.1:8317/v0/management/accounts/claude
 # 添加账号文件后重新加载（无需重启服务）
 curl -X POST http://127.0.0.1:8317/v0/management/reload
 
+# 启用 / 禁用 / 重置 / 刷新额度（action ∈ enable | disable | reset | refresh_quota）
+curl -X POST http://127.0.0.1:8317/v0/management/accounts/action \
+  -H "Content-Type: application/json" \
+  -d '{"backend":"claude","id":"work@example.com","action":"disable"}'
+
+# 刷新所有账号的额度（5 小时 / 周；目前支持 codex / claude）
+curl -X POST http://127.0.0.1:8317/v0/management/quota/refresh
+
 # 查看可用模型列表
 curl http://127.0.0.1:8317/v1/models
 
@@ -364,12 +373,50 @@ curl http://127.0.0.1:8317/health
 {
   "accounts": {
     "claude": [
-      {"backend": "claude", "id": "work@example.com", "token": "sk-ant-...", "enabled": true, "cooling": false, "error_count": 0},
-      {"backend": "claude", "id": "personal@example.com", "token": "sk-ant-...", "enabled": true, "cooling": true, "error_count": 2}
+      {"backend": "claude", "id": "work@example.com", "status": "available", "available": true, "cooling": false, "cooling_seconds": 0, "error_count": 0, "quota": null}
+    ],
+    "codex": [
+      {"backend": "codex", "id": "hk@example.com", "status": "available", "available": true, "error_count": 0,
+       "quota": {"plan_type": "plus",
+                 "five_hour": {"used_percent": 4, "reset_at": 1782556912, "window_minutes": 300},
+                 "weekly": {"used_percent": 33, "reset_at": 1783084966, "window_minutes": 10080}},
+       "quota_error": ""}
     ]
   }
 }
 ```
+
+---
+
+## 账号状态面板
+
+两种可视化界面，按需选用：
+
+**① 内嵌 HTML 面板（零依赖，随服务自带）**
+
+服务启动后直接访问 <http://127.0.0.1:8317/>（或 `/dashboard`）。卡片式展示各 backend 的账号、状态徽章（🟢 可用 / 🟡 冷却中 / 🔴 已禁用）、脱敏令牌、优先级/权重、令牌到期倒计时、冷却剩余、失败次数、禁用原因，5 秒自动刷新。无需安装任何额外依赖。
+
+点「刷新额度」可拉取各账号的 **5 小时 / 周额度**（进度条 + 重置倒计时 + 套餐类型）。额度查询较慢且有限流，因此不随状态自动刷新，按需手动触发。
+
+目前支持 **codex** 和 **claude**：
+
+| backend | usage 端点 | token 策略 |
+| --- | --- | --- |
+| codex | `chatgpt.com/backend-api/wham/usage` | 每次用 `refresh_token` 刷新后查询 |
+| claude | `api.anthropic.com/api/oauth/usage`（需 `anthropic-beta` + `User-Agent`） | 先用现有 token 查，401 才刷新（刷新端点限流严，避免空刷） |
+
+其余 backend（grok / copilot / antigravity）暂无公开 usage 端点，不显示额度。Claude 的 `User-Agent` 版本号可用 `CLI_PROXY_CLAUDE_CODE_VERSION` 覆盖。
+
+**② Streamlit 管理台（带操作按钮）**
+
+需要表格筛选 + 一键启用/禁用/重置/reload 时使用：
+
+```bash
+python -m pip install -e ".[ui]"            # 安装 streamlit
+python -m streamlit run src/proxy/ui/streamlit_app.py
+```
+
+默认连接 <http://127.0.0.1:8317>，可用 `CLI_PROXY_URL` 环境变量或左侧栏修改；若服务设了 `CLI_PROXY_API_KEY`，在左侧栏填入即可。操作按钮通过 `/v0/management/accounts/action` 端点生效并落盘，含每账号「额度」按钮与左侧栏「刷新额度」批量按钮，额度以进度条展示 5 小时 / 周用量。
 
 ---
 

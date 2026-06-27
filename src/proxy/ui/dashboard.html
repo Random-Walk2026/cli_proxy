@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>cli_proxy · 账号状态</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --bg-card: #181b22;
+    --bg-card-hover: #1e222b;
+    --border: #272b35;
+    --text: #e6e8ec;
+    --text-dim: #9aa0ab;
+    --text-faint: #6b7280;
+    --green: #2ecc71;
+    --yellow: #f1c40f;
+    --red: #e74c3c;
+    --blue: #4f8cff;
+    --accent: #4f8cff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+      "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    -webkit-font-smoothing: antialiased;
+  }
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 18px 28px;
+    border-bottom: 1px solid var(--border);
+    position: sticky;
+    top: 0;
+    background: rgba(15, 17, 21, 0.85);
+    backdrop-filter: blur(8px);
+    z-index: 10;
+  }
+  header h1 {
+    font-size: 17px;
+    font-weight: 600;
+    margin: 0;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  header h1 .logo {
+    width: 9px; height: 9px; border-radius: 50%;
+    background: var(--green);
+    box-shadow: 0 0 8px var(--green);
+  }
+  .toolbar { display: flex; align-items: center; gap: 14px; }
+  .meta { font-size: 12px; color: var(--text-faint); }
+  button.refresh {
+    background: var(--bg-card);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 6px 12px;
+    font-size: 13px;
+    cursor: pointer;
+    transition: background .15s, border-color .15s;
+  }
+  button.refresh:hover { background: var(--bg-card-hover); border-color: var(--accent); }
+  button.refresh:active { transform: translateY(1px); }
+  label.auto {
+    font-size: 12px; color: var(--text-dim);
+    display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
+  }
+
+  .summary {
+    display: flex; gap: 14px; flex-wrap: wrap;
+    padding: 22px 28px 4px;
+  }
+  .stat {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 14px 18px;
+    min-width: 116px;
+  }
+  .stat .n { font-size: 24px; font-weight: 700; line-height: 1; }
+  .stat .l { font-size: 12px; color: var(--text-dim); margin-top: 6px; }
+  .stat.ok .n { color: var(--green); }
+  .stat.warn .n { color: var(--yellow); }
+  .stat.err .n { color: var(--red); }
+
+  main { padding: 14px 28px 48px; }
+  .backend {
+    margin-top: 26px;
+  }
+  .backend > h2 {
+    font-size: 14px;
+    font-weight: 600;
+    margin: 0 0 12px;
+    color: var(--text-dim);
+    display: flex; align-items: center; gap: 10px;
+    text-transform: capitalize;
+  }
+  .backend > h2 .count {
+    font-size: 12px; color: var(--text-faint); font-weight: 400;
+  }
+  .cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 14px;
+  }
+  .card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px;
+    transition: border-color .15s, transform .15s;
+  }
+  .card:hover { border-color: #353a46; transform: translateY(-1px); }
+  .card .top {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 10px; margin-bottom: 12px;
+  }
+  .card .id {
+    font-size: 14px; font-weight: 600;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .badge {
+    flex-shrink: 0;
+    font-size: 11px; font-weight: 600;
+    padding: 3px 9px; border-radius: 999px;
+    display: inline-flex; align-items: center; gap: 5px;
+  }
+  .badge .dot { width: 7px; height: 7px; border-radius: 50%; }
+  .badge.available { background: rgba(46,204,113,.14); color: var(--green); }
+  .badge.available .dot { background: var(--green); box-shadow: 0 0 6px var(--green); }
+  .badge.cooling { background: rgba(241,196,15,.14); color: var(--yellow); }
+  .badge.cooling .dot { background: var(--yellow); }
+  .badge.disabled { background: rgba(231,76,60,.14); color: var(--red); }
+  .badge.disabled .dot { background: var(--red); }
+
+  .rows { display: flex; flex-direction: column; gap: 7px; }
+  .row { display: flex; justify-content: space-between; font-size: 12.5px; gap: 12px; }
+  .row .k { color: var(--text-faint); }
+  .row .v { color: var(--text-dim); font-variant-numeric: tabular-nums; text-align: right; }
+  .row .v.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .reason {
+    margin-top: 10px; padding: 8px 10px;
+    background: rgba(231,76,60,.08);
+    border: 1px solid rgba(231,76,60,.2);
+    border-radius: 8px;
+    font-size: 12px; color: #f0a59b;
+    word-break: break-word;
+  }
+
+  .quota { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 11px; }
+  .quota .qhead {
+    display: flex; justify-content: space-between; align-items: center;
+    font-size: 11px; color: var(--text-faint); margin-bottom: 9px;
+  }
+  .quota .plan {
+    font-size: 10.5px; font-weight: 600; color: var(--accent);
+    background: rgba(79,140,255,.12); padding: 2px 8px; border-radius: 999px;
+    text-transform: uppercase;
+  }
+  .qbar { margin-bottom: 9px; }
+  .qbar:last-child { margin-bottom: 0; }
+  .qbar .ql { display: flex; justify-content: space-between; font-size: 11.5px; margin-bottom: 4px; }
+  .qbar .ql .name { color: var(--text-dim); }
+  .qbar .ql .val { color: var(--text); font-variant-numeric: tabular-nums; }
+  .qbar .ql .reset { color: var(--text-faint); font-size: 10.5px; }
+  .qtrack { height: 6px; border-radius: 999px; background: #23272f; overflow: hidden; }
+  .qfill { height: 100%; border-radius: 999px; transition: width .3s; }
+  .qfill.low { background: var(--green); }
+  .qfill.medium { background: var(--yellow); }
+  .qfill.high { background: #e67e22; }
+  .qfill.critical { background: var(--red); }
+  .quota .qerr { font-size: 11.5px; color: #f0a59b; }
+  .quota .qnone { font-size: 11.5px; color: var(--text-faint); }
+
+  .empty, .error {
+    text-align: center; color: var(--text-faint);
+    padding: 60px 20px; font-size: 14px;
+  }
+  .error { color: var(--red); }
+  .empty-backend { font-size: 12.5px; color: var(--text-faint); padding: 4px 2px; }
+</style>
+</head>
+<body>
+  <header>
+    <h1><span class="logo"></span> cli_proxy 账号状态</h1>
+    <div class="toolbar">
+      <span class="meta" id="updated"></span>
+      <label class="auto"><input type="checkbox" id="auto" checked /> 自动刷新</label>
+      <label class="auto" title="拉取额度前强制刷新 token（claude 默认先试再刷，避开刷新端点限流）"><input type="checkbox" id="preRefresh" /> 预刷新</label>
+      <button class="refresh" id="quotaBtn" title="拉取各账号的 5 小时 / 周额度（较慢）">刷新额度</button>
+      <button class="refresh" id="refreshBtn">刷新</button>
+    </div>
+  </header>
+
+  <section class="summary" id="summary"></section>
+  <main id="root"><div class="empty">加载中…</div></main>
+
+<script>
+const REFRESH_MS = 5000;
+let timer = null;
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, c =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+function fmtExpiry(ts) {
+  if (!ts) return "—";
+  const ms = ts * 1000;
+  const diff = ms - Date.now();
+  const d = new Date(ms);
+  const when = d.toLocaleString();
+  if (diff <= 0) return when + "（已过期）";
+  const mins = Math.round(diff / 60000);
+  if (mins < 60) return when + `（${mins} 分钟后）`;
+  const hrs = Math.round(mins / 60);
+  if (hrs < 48) return when + `（${hrs} 小时后）`;
+  return when + `（${Math.round(hrs / 24)} 天后）`;
+}
+
+function fmtCooling(secs) {
+  if (!secs) return "—";
+  if (secs < 60) return secs + " 秒";
+  return Math.floor(secs / 60) + " 分 " + (secs % 60) + " 秒";
+}
+
+const LABEL = { available: "可用", cooling: "冷却中", disabled: "已禁用" };
+
+function usageClass(pct) {
+  if (pct >= 90) return "critical";
+  if (pct >= 70) return "high";
+  if (pct >= 40) return "medium";
+  return "low";
+}
+
+function fmtReset(ts) {
+  if (!ts) return "";
+  const diff = ts * 1000 - Date.now();
+  if (diff <= 0) return "即将重置";
+  const mins = Math.round(diff / 60000);
+  if (mins < 60) return `${mins} 分钟后重置`;
+  const hrs = Math.round(mins / 60);
+  if (hrs < 48) return `${hrs} 小时后重置`;
+  return `${Math.round(hrs / 24)} 天后重置`;
+}
+
+function qbar(name, win) {
+  if (!win || win.used_percent == null) return "";
+  const used = win.used_percent;
+  return `<div class="qbar">
+    <div class="ql">
+      <span class="name">${esc(name)}</span>
+      <span><span class="val">已用 ${used}%</span> · <span class="reset">${esc(fmtReset(win.reset_at))}</span></span>
+    </div>
+    <div class="qtrack"><div class="qfill ${usageClass(used)}" style="width:${used}%"></div></div>
+  </div>`;
+}
+
+function quotaBlock(a) {
+  // 不支持额度的 backend（无 quota 且无 error 且没刷新过）不显示该区块
+  const has = a.quota || a.quota_error;
+  if (!has) return "";
+  if (a.quota_error) {
+    return `<div class="quota"><div class="qhead"><span>额度</span></div>
+      <div class="qerr">额度获取失败：${esc(a.quota_error)}</div></div>`;
+  }
+  const q = a.quota;
+  const plan = q.plan_type ? `<span class="plan">${esc(q.plan_type)}</span>` : "";
+  const bars = qbar("5 小时", q.five_hour) + qbar("本周", q.weekly);
+  return `<div class="quota">
+    <div class="qhead"><span>额度</span>${plan}</div>
+    ${bars || '<div class="qnone">无额度窗口数据</div>'}
+  </div>`;
+}
+
+function card(a) {
+  const status = a.status || (a.disabled ? "disabled" : a.cooling ? "cooling" : "available");
+  const rows = [];
+  if (a.token) rows.push(["令牌", esc(a.token), "mono"]);
+  if (a.home) rows.push(["登录态目录", esc(a.home), "mono"]);
+  rows.push(["优先级 / 权重", `${a.priority} / ${a.weight}`, ""]);
+  if (a.expiry) rows.push(["令牌到期", esc(fmtExpiry(a.expiry)), ""]);
+  if (status === "cooling") rows.push(["冷却剩余", esc(fmtCooling(a.cooling_seconds)), ""]);
+  if (a.error_count) rows.push(["失败次数", String(a.error_count), ""]);
+
+  const rowsHtml = rows.map(([k, v, cls]) =>
+    `<div class="row"><span class="k">${esc(k)}</span><span class="v ${cls}">${v}</span></div>`
+  ).join("");
+
+  const reason = (status === "disabled" && a.disabled_reason)
+    ? `<div class="reason">${esc(a.disabled_reason)}</div>` : "";
+
+  return `<div class="card">
+    <div class="top">
+      <span class="id" title="${esc(a.id)}">${esc(a.id)}</span>
+      <span class="badge ${status}"><span class="dot"></span>${LABEL[status] || status}</span>
+    </div>
+    <div class="rows">${rowsHtml}</div>
+    ${reason}
+    ${quotaBlock(a)}
+  </div>`;
+}
+
+function render(data) {
+  const accounts = data.accounts || {};
+  const backends = Object.keys(accounts).sort();
+  const all = backends.flatMap(b => accounts[b]);
+
+  // 汇总
+  const total = all.length;
+  const ok = all.filter(a => (a.status || (a.disabled ? "disabled" : a.cooling ? "cooling" : "available")) === "available").length;
+  const cooling = all.filter(a => a.status === "cooling" || (!a.status && a.cooling && !a.disabled)).length;
+  const disabled = all.filter(a => a.status === "disabled" || (!a.status && a.disabled)).length;
+  document.getElementById("summary").innerHTML = `
+    <div class="stat"><div class="n">${total}</div><div class="l">账号总数</div></div>
+    <div class="stat ok"><div class="n">${ok}</div><div class="l">可用</div></div>
+    <div class="stat warn"><div class="n">${cooling}</div><div class="l">冷却中</div></div>
+    <div class="stat err"><div class="n">${disabled}</div><div class="l">已禁用</div></div>`;
+
+  const root = document.getElementById("root");
+  if (total === 0) {
+    root.innerHTML = `<div class="empty">尚未加载到任何账号。<br/>请在 <code>~/.cli_proxy_api/</code> 放置账号文件，或在 .env 配置令牌。</div>`;
+    return;
+  }
+  root.innerHTML = backends.map(b => {
+    const list = accounts[b];
+    const inner = list.length
+      ? `<div class="cards">${list.map(card).join("")}</div>`
+      : `<div class="empty-backend">无账号</div>`;
+    return `<section class="backend">
+      <h2>${esc(b)} <span class="count">${list.length} 个账号</span></h2>
+      ${inner}
+    </section>`;
+  }).join("");
+}
+
+async function load() {
+  try {
+    const res = await fetch("/v0/management/accounts", { cache: "no-store" });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const data = await res.json();
+    render(data);
+    document.getElementById("updated").textContent =
+      "更新于 " + new Date().toLocaleTimeString();
+  } catch (e) {
+    document.getElementById("root").innerHTML =
+      `<div class="error">加载失败：${esc(e.message)}<br/>请确认 cli_proxy 服务正在运行。</div>`;
+  }
+}
+
+function schedule() {
+  if (timer) clearInterval(timer);
+  if (document.getElementById("auto").checked) {
+    timer = setInterval(load, REFRESH_MS);
+  }
+}
+
+async function refreshQuota() {
+  const btn = document.getElementById("quotaBtn");
+  const old = btn.textContent;
+  btn.textContent = "刷新额度中…";
+  btn.disabled = true;
+  try {
+    const pre = document.getElementById("preRefresh").checked;
+    const url = "/v0/management/quota/refresh" + (pre ? "?pre_refresh=true" : "");
+    const res = await fetch(url, { method: "POST" });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    await load();
+  } catch (e) {
+    document.getElementById("updated").textContent = "额度刷新失败：" + e.message;
+  } finally {
+    btn.textContent = old;
+    btn.disabled = false;
+  }
+}
+
+document.getElementById("refreshBtn").addEventListener("click", load);
+document.getElementById("quotaBtn").addEventListener("click", refreshQuota);
+document.getElementById("auto").addEventListener("change", schedule);
+load();
+schedule();
+</script>
+</body>
+</html>

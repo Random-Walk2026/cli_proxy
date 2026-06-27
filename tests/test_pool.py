@@ -69,6 +69,29 @@ class AuthFailureDisablesPermanently(unittest.TestCase):
         self.assertTrue(acc.is_cooling)
 
 
+class LoadIncludesDisabled(unittest.TestCase):
+    def test_disabled_account_still_loaded(self) -> None:
+        """禁用账号也要入池：否则半开探测无法在重启后复活，状态面板也看不到它。"""
+        from proxy import account as accountmod
+
+        with tempfile.TemporaryDirectory() as tmp:
+            _write_account(
+                Path(tmp),
+                enabled=False,
+                disabled_reason="invalid_grant: old",
+                disabled_at=time.time(),
+            )
+            orig = accountmod.AUTH_DIR
+            accountmod.AUTH_DIR = Path(tmp)
+            try:
+                loaded = accountmod.load_accounts("claude")
+            finally:
+                accountmod.AUTH_DIR = orig
+            self.assertEqual(len(loaded), 1)
+            self.assertTrue(loaded[0].is_disabled)
+            self.assertEqual(loaded[0].status, "disabled")
+
+
 class HalfOpenRecovery(unittest.TestCase):
     def test_disabled_account_probed_then_recovers(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

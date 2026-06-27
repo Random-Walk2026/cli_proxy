@@ -32,13 +32,21 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from .config import DEFAULT_HOST, DEFAULT_PORT
+from .config import load_project_env
 
 # token 提前刷新余量（秒）：expiry 距现在不足这个值就当作需要刷新。
 # 对齐 cockpit-tools 的 ensure_fresh_token（300s 余量），比只在过期瞬间刷新更稳。
 REFRESH_SKEW_SECONDS = 300
 
-AUTH_DIR = Path(os.environ.get("CLI_PROXY_AUTH_DIR", Path.home() / ".cli_proxy_api"))
+load_project_env()
+
+
+def _auth_dir_from_env() -> Path:
+    configured = os.environ.get("CLI_PROXY_AUTH_DIR", "").strip()
+    return Path(configured).expanduser() if configured else Path.home() / ".cli_proxy_api"
+
+
+AUTH_DIR = _auth_dir_from_env()
 
 # token 型后端：CLI 直接认一个环境变量里的 token，注入不同 token 即切换账号。
 # （codex / antigravity 不在此列——它们没有「一个 token 变量搞定」的入口，靠 _HOME_ENV 目录隔离。）
@@ -96,6 +104,13 @@ class Account:
     disabled_at: float = 0.0         # 禁用发生的 unix 时间戳
 
     source_path: str = ""            # 该账号来源的 JSON 文件路径（用于刷新/禁用状态写回；env 兜底账号为空）
+
+    # ── 额度快照（持久化，懒刷新）─────────────────────────────────────────────
+    # 由 quota.py 通过各 provider 的 usage 端点抓取并归一化后写入；状态面板直接读这里的缓存，
+    # 不在每次轮询时实时拉取（usage 端点昂贵且限流）。手动「刷新额度」时才更新。
+    quota: Optional[dict] = None     # 归一化额度：{"five_hour":{...}, "weekly":{...}, "plan_type":...}
+    quota_error: str = ""            # 上次刷新失败原因（如 refresh_token_invalidated）
+    quota_updated_at: float = 0.0    # 额度快照的 unix 时间戳
 
     # 冷却状态（运行时，不序列化）
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
@@ -172,6 +187,22 @@ class Account:
             env.update(self.extra_env)
         return env
 
+    @property
+    def cooling_seconds(self) -> int:
+        """距冷却结束还剩多少秒（非冷却中为 0）。供 UI 展示倒计时。"""
+        if not self.is_cooling:
+            return 0
+        return max(0, int(self._cooling_until - time.monotonic()))
+
+    @property
+    def status(self) -> str:
+        """聚合状态标签，供 UI 直接着色：available / cooling / disabled。"""
+        if self.is_disabled:
+            return "disabled"
+        if self.is_cooling:
+            return "cooling"
+        return "available"
+
     def to_dict(self) -> dict:
         return {
             "backend": self.backend,
@@ -179,13 +210,19 @@ class Account:
             "token": self.token[:8] + "…" if self.token else "",  # 脱敏
             "home": self.home,
             "enabled": self.enabled,
+            "available": self.is_available,
+            "status": self.status,
             "cooling": self.is_cooling,
+            "cooling_seconds": self.cooling_seconds,
             "disabled": self.is_disabled,
             "disabled_reason": self.disabled_reason,
             "expiry": self.expiry,
             "priority": self.priority,
             "weight": self.weight,
             "error_count": self._error_count,
+            "quota": self.quota,
+            "quota_error": self.quota_error,
+            "quota_updated_at": self.quota_updated_at,
         }
 
     def persist(self) -> None:
@@ -207,9 +244,26 @@ class Account:
         data["type"] = self.backend
         if self.token:
             data["token"] = self.token
+            # 文件原本用 access_token / accessToken（codex/claude 等）时同步更新，避免刷新后残留旧 token
+            if "access_token" in data:
+                data["access_token"] = self.token
+            if "accessToken" in data:
+                data["accessToken"] = self.token
         if self.refresh_token:
             data["refresh_token"] = self.refresh_token
+            if "refreshToken" in data:
+                data["refreshToken"] = self.refresh_token
         data["enabled"] = self.enabled
+
+        # 额度快照：有则落盘，供重启后立即展示；失败原因一并保留
+        if self.quota is not None:
+            data["quota"] = self.quota
+        if self.quota_error:
+            data["quota_error"] = self.quota_error
+        else:
+            data.pop("quota_error", None)
+        if self.quota_updated_at:
+            data["quota_updated_at"] = self.quota_updated_at
         if self.expiry:
             data["expiry"] = (
                 datetime.fromtimestamp(self.expiry, tz=timezone.utc)
@@ -271,7 +325,14 @@ def _account_from_file(path: Path) -> Optional[Account]:
     backend = str(data.get("type", "")).strip().lower()
     if not backend:
         return None
-    token = str(data.get("token", data.get("access_token", data.get("key", "")))).strip()
+    # 兼容多种 token 字段写法：token / access_token / accessToken（Claude Code 凭据格式）/ key
+    token = str(
+        data.get("token")
+        or data.get("access_token")
+        or data.get("accessToken")
+        or data.get("key")
+        or ""
+    ).strip()
     home = str(data.get("home", "")).strip()
     if home:
         home = str(Path(home).expanduser())
@@ -285,7 +346,7 @@ def _account_from_file(path: Path) -> Optional[Account]:
         backend=backend,
         id=str(data.get("email", path.stem)),
         token=token,
-        refresh_token=str(data.get("refresh_token", "")),
+        refresh_token=str(data.get("refresh_token") or data.get("refreshToken") or ""),
         home=home,
         extra_env=extra_env,
         # disabled_reason 落盘后，重启仍视为禁用（除非用户手动改 enabled / 删原因）
@@ -296,6 +357,9 @@ def _account_from_file(path: Path) -> Optional[Account]:
         priority=int(data.get("priority", 0) or 0),
         weight=max(1, int(data.get("weight", 1) or 1)),
         source_path=str(path),
+        quota=data.get("quota") if isinstance(data.get("quota"), dict) else None,
+        quota_error=str(data.get("quota_error", "")),
+        quota_updated_at=float(data.get("quota_updated_at", 0.0) or 0.0),
     )
 
 
@@ -321,7 +385,10 @@ def load_accounts(backend: Optional[str] = None) -> list[Account]:
     if AUTH_DIR.is_dir():
         for f in sorted(AUTH_DIR.glob("*.json")):
             acc = _account_from_file(f)
-            if acc and acc.enabled and (backend is None or acc.backend == backend):
+            # 注意：禁用账号（enabled=False / 带 disabled_reason）也照常入池——
+            # pick() 用 is_available 跳过它们，半开探测据此在重启后自动复活（见 pool.py），
+            # 状态面板也才能把禁用账号显示出来。过滤交给调度层，而非加载层。
+            if acc and (backend is None or acc.backend == backend):
                 key = f"{acc.backend}:{acc.id}"
                 if key not in seen_ids:
                     accounts.append(acc)

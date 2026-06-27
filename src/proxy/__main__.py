@@ -26,6 +26,7 @@ def main() -> None:
     args = parser.parse_args()
 
     print(f"cli_proxy API  →  http://{args.host}:{args.port}/v1")
+    print(f"账号状态面板   →  http://{args.host}:{args.port}/")
     print(f"支持后端：claude / codex / grok / antigravity / copilot")
     print(f"模型格式：<backend>/<model>@<effort>，如 claude/sonnet@high")
     print()

@@ -166,6 +166,39 @@ class AccountPool:
             result[backend] = [a.to_dict() for a in accs]
         return result
 
+    def find(self, backend: str, account_id: str) -> Optional[Account]:
+        """按 backend + id 定位账号（供管理操作）。"""
+        self._ensure_loaded()
+        for acc in self._accounts.get(backend, []):
+            if acc.id == account_id:
+                return acc
+        return None
+
+    def set_enabled(self, backend: str, account_id: str, enabled: bool) -> Optional[Account]:
+        """手动启用 / 禁用某账号并落盘。返回被操作的账号，找不到返回 None。
+
+        - 启用：清除禁用态 + 重置冷却（等价于人工确认该号已修复）。
+        - 禁用：标记人工禁用原因（与 invalid_grant 自动禁用区分）。
+        """
+        acc = self.find(backend, account_id)
+        if acc is None:
+            return None
+        if enabled:
+            acc.clear_disabled()
+            acc.reset()
+        else:
+            acc.disable("manual: 由管理面板禁用")
+        acc.persist()
+        return acc
+
+    def reset_account(self, backend: str, account_id: str) -> Optional[Account]:
+        """清除某账号的冷却 / 错误计数（不动禁用态）。找不到返回 None。"""
+        acc = self.find(backend, account_id)
+        if acc is None:
+            return None
+        acc.reset()
+        return acc
+
 
 # 全局单例（server.py 和 runner.py 共用）
 _pool: Optional[AccountPool] = None
